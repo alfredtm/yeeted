@@ -3,6 +3,8 @@ on: push
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}
+  GO_VERSION: "1.25"
+  LDFLAGS: "-s -w"
 
 jobs:
   build:
@@ -10,6 +12,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -19,26 +22,44 @@ jobs:
         id: vars
         run: echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
+      - name: Bootstrap crane (for base digest resolution)
+        run: |
+          if [ ! -x /usr/local/bin/crane ]; then
+            curl -sL https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz | tar xz crane
+            sudo mv crane /usr/local/bin/
+          fi
+
+      - name: Resolve base image digest
+        id: base
+        run: |
+          DIGEST=$(crane digest gcr.io/distroless/static:nonroot)
+          REF="gcr.io/distroless/static@${DIGEST}"
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "::notice::base pinned to ${REF}"
+
       - uses: alfredtm/yeet-cache-action@v1
         id: cache
         with:
           paths: cmd internal go.mod go.sum
+          extra: go=${{ env.GO_VERSION }} base=${{ steps.base.outputs.ref }} ldflags=${{ env.LDFLAGS }}
           image: ${{ env.IMAGE }}
           registry-password: ${{ secrets.GITHUB_TOKEN }}
+          sign: 'true'
           tags: crane-${{ steps.vars.outputs.short_sha }},latest
 
       - name: "Slow path: setup Go"
         if: steps.cache.outputs.hit == 'false'
         uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: go.sum
 
       - name: "Slow path: cross-compile (amd64)"
         if: steps.cache.outputs.hit == 'false'
         run: |
           START=$(date +%s%N)
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -trimpath -o app ./cmd/server
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -ldflags="${{ env.LDFLAGS }}" -trimpath -o app ./cmd/server
           END=$(date +%s%N)
           echo "::notice::go build took $(( (END - START) / 1000000 ))ms"
           ls -la app
@@ -52,9 +73,8 @@ jobs:
           cp app _image/app/server
           tar -cf layer.tar -C _image .
 
-          # Build the image and tag it with src-<hash> so the next run hits the cache.
           crane append \
-            --base gcr.io/distroless/static:nonroot \
+            --base "${{ steps.base.outputs.ref }}" \
             --new_layer layer.tar \
             --new_tag "${{ steps.cache.outputs.src-tag }}"
 
@@ -65,3 +85,10 @@ jobs:
 
           END=$(date +%s%N)
           echo "::notice::crane append+mutate+tag took $(( (END - START) / 1000000 ))ms"
+
+      - name: "Slow path: sign cache entry"
+        if: steps.cache.outputs.hit == 'false'
+        uses: alfredtm/yeet-cache-action/sign@v1
+        with:
+          src-tag: ${{ steps.cache.outputs.src-tag }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}

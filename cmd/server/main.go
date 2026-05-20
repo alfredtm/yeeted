@@ -10,7 +10,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alfredtm/yeeted/internal/db"
 	"github.com/alfredtm/yeeted/internal/handler"
+	"github.com/alfredtm/yeeted/internal/telemetry"
 )
 
 func main() {
@@ -19,9 +21,30 @@ func main() {
 		port = "8080"
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	shutdownTracing, err := telemetry.Init(ctx, "yeeted")
+	if err != nil {
+		log.Printf("telemetry init failed: %v (continuing)", err)
+	}
+	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") == "" {
+		log.Printf("tracing disabled (no OTEL_EXPORTER_OTLP_ENDPOINT)")
+	}
+
+	pool, err := db.Connect(ctx)
+	if err != nil {
+		log.Printf("db connect failed: %v (continuing without persistence)", err)
+	}
+	if pool != nil {
+		log.Printf("connected to postgres")
+	} else {
+		log.Printf("no DATABASE_URL set, running without persistence")
+	}
+
 	srv := &http.Server{
 		Addr:              ":" + port,
-		Handler:           handler.NewRouter(),
+		Handler:           handler.NewRouter(pool),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -46,9 +69,20 @@ func main() {
 		log.Printf("shutting down (signal: %s)", sig)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatalf("shutdown error: %v", err)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("server shutdown error: %v", err)
+	}
+
+	if shutdownTracing != nil {
+		if err := shutdownTracing(shutdownCtx); err != nil {
+			log.Printf("tracing shutdown error: %v", err)
+		}
+	}
+
+	if pool != nil {
+		pool.Close()
 	}
 }

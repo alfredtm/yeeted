@@ -1,0 +1,40 @@
+name: "build: ko (go-native)"
+on: push
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+  KO_DOCKER_REPO: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: go.sum
+
+      - uses: ko-build/setup-ko@v0.7
+        with:
+          version: v0.16.0
+
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | ko login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build + push multi-arch with ko
+        run: |
+          START=$(date +%s%N)
+
+          ko publish \
+            --platform=linux/amd64,linux/arm64 \
+            --base-import-paths \
+            --tags "ko-${GITHUB_SHA::7},latest-ko" \
+            ./cmd/server
+
+          END=$(date +%s%N)
+          echo "::notice::ko multi-arch build+push took $(( (END - START) / 1000000 ))ms"

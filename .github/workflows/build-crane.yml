@@ -15,10 +15,6 @@ jobs:
         with:
           fetch-depth: 1
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.22"
-
       - name: Cache crane binary
         uses: actions/cache@v4
         id: crane-cache
@@ -26,44 +22,93 @@ jobs:
           path: /usr/local/bin/crane
           key: crane-latest-linux-amd64
 
-      - name: Build binary + install crane
+      - name: Install crane
         run: |
-          START=$(date +%s%N)
-
           if [ ! -f /usr/local/bin/crane ]; then
-            (curl -sL https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz \
-              | tar xz crane && sudo mv crane /usr/local/bin/) &
+            curl -sL https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz \
+              | tar xz crane && sudo mv crane /usr/local/bin/
           fi
 
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-            go build -ldflags="-s -w" -trimpath \
-            -o app ./cmd/server
-
-          wait
-
-          END=$(date +%s%N)
-          echo "::notice::go build + crane install took $(( (END - START) / 1000000 ))ms"
-
-      - name: Push image with crane
+      - name: Compute source hash + check registry cache
+        id: cache
         run: |
+          HASH=$( (git rev-parse HEAD:cmd HEAD:internal HEAD:go.mod HEAD:go.sum) | sha256sum | cut -c1-12 )
+          echo "src_hash=$HASH" >> $GITHUB_OUTPUT
+          echo "::notice::source hash = $HASH"
+
           echo "${{ secrets.GITHUB_TOKEN }}" | crane auth login ghcr.io -u ${{ github.actor }} --password-stdin
 
-          mkdir -p _image/app
-          cp app _image/app/server
-          tar -cf layer.tar -C _image .
+          if crane manifest "${IMAGE}:src-${HASH}" >/dev/null 2>&1; then
+            echo "cache_hit=true" >> $GITHUB_OUTPUT
+            echo "::notice::CACHE HIT — skipping build, will retag"
+          else
+            echo "cache_hit=false" >> $GITHUB_OUTPUT
+            echo "::notice::cache miss — full build"
+          fi
 
-          TAG="${IMAGE}:crane-${GITHUB_SHA::7}"
+      - name: "Fast path: content-addressed retag"
+        if: steps.cache.outputs.cache_hit == 'true'
+        run: |
+          START=$(date +%s%N)
+          crane tag "${IMAGE}:src-${{ steps.cache.outputs.src_hash }}" "crane-${GITHUB_SHA::7}"
+          crane tag "${IMAGE}:src-${{ steps.cache.outputs.src_hash }}" latest
+          END=$(date +%s%N)
+          echo "::notice::content-addressed retag took $(( (END - START) / 1000000 ))ms"
 
+      - name: "Slow path: setup Go"
+        if: steps.cache.outputs.cache_hit == 'false'
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: go.sum
+
+      - name: "Slow path: parallel cross-compile (amd64 + arm64)"
+        if: steps.cache.outputs.cache_hit == 'false'
+        run: |
+          START=$(date +%s%N)
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -trimpath -o app-amd64 ./cmd/server &
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -trimpath -o app-arm64 ./cmd/server &
+          wait
+          END=$(date +%s%N)
+          echo "::notice::parallel go build (amd64+arm64) took $(( (END - START) / 1000000 ))ms"
+          ls -la app-amd64 app-arm64
+
+      - name: "Slow path: crane append + mutate + index per-arch"
+        if: steps.cache.outputs.cache_hit == 'false'
+        run: |
           START=$(date +%s%N)
 
-          crane append \
-            --base gcr.io/distroless/static:nonroot \
-            --new_layer layer.tar \
-            --new_tag "${TAG}"
+          for arch in amd64 arm64; do
+            mkdir -p _image_${arch}/app
+            cp app-${arch} _image_${arch}/app/server
+            tar -cf layer-${arch}.tar -C _image_${arch} .
+          done
 
-          crane mutate "${TAG}" --entrypoint /app/server
+          TAG_AMD64="${IMAGE}:crane-${GITHUB_SHA::7}-amd64"
+          TAG_ARM64="${IMAGE}:crane-${GITHUB_SHA::7}-arm64"
+          TAG_MULTI="${IMAGE}:crane-${GITHUB_SHA::7}"
+          SRC_TAG="${IMAGE}:src-${{ steps.cache.outputs.src_hash }}"
+
+          # Pin per-arch base digests — crane append --base picks runner arch by default,
+          # which would give arm64 an amd64 base.
+          AMD64_BASE=$(crane digest --platform linux/amd64 gcr.io/distroless/static:nonroot)
+          ARM64_BASE=$(crane digest --platform linux/arm64 gcr.io/distroless/static:nonroot)
+
+          crane append --base "gcr.io/distroless/static@${AMD64_BASE}" --new_layer layer-amd64.tar --new_tag "${TAG_AMD64}" &
+          crane append --base "gcr.io/distroless/static@${ARM64_BASE}" --new_layer layer-arm64.tar --new_tag "${TAG_ARM64}" &
+          wait
+
+          crane mutate "${TAG_AMD64}" --entrypoint /app/server &
+          crane mutate "${TAG_ARM64}" --entrypoint /app/server &
+          wait
+
+          crane index append \
+            --manifest "${TAG_AMD64}" \
+            --manifest "${TAG_ARM64}" \
+            --tag "${TAG_MULTI}"
+
+          crane tag "${TAG_MULTI}" "src-${{ steps.cache.outputs.src_hash }}"
+          crane tag "${TAG_MULTI}" latest
 
           END=$(date +%s%N)
-          echo "::notice::crane append+mutate+push took $(( (END - START) / 1000000 ))ms"
-
-          crane tag "${TAG}" latest
+          echo "::notice::crane multi-arch append+mutate+index+tag took $(( (END - START) / 1000000 ))ms"

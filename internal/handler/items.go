@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/alfredtm/yeeted/internal/model"
 )
 
@@ -58,7 +60,7 @@ func (h *ItemsHandler) Create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *ItemsHandler) Get(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+	id := chi.URLParam(r, "id")
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "id is required")
 		return
@@ -72,7 +74,7 @@ func (h *ItemsHandler) Get(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *ItemsHandler) Delete(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+	id := chi.URLParam(r, "id")
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "id is required")
 		return

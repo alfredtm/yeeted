@@ -38,7 +38,7 @@ jobs:
             fi
             HASHES_INPUT="${HASHES_INPUT}${SHA}"$'\n'
           done
-          EXTRA="go=${{ env.GO_VERSION }} base=${{ env.BASE_IMAGE }} ldflags=${{ env.LDFLAGS }}"
+          EXTRA="go=${{ env.GO_VERSION }} base=${{ env.BASE_IMAGE }} ldflags=${{ env.LDFLAGS }} sigv=gh-attest-v1"
           HASH=$(printf '%sextra:%s\n' "$HASHES_INPUT" "$EXTRA" | sha256sum | cut -c1-12)
           echo "hash=${HASH}" >> "$GITHUB_OUTPUT"
           END=$(date +%s%N)

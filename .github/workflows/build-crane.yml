@@ -1,0 +1,66 @@
+name: "build: crane (fast)"
+on: push
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Cache crane binary
+        uses: actions/cache@v4
+        id: crane-cache
+        with:
+          path: /usr/local/bin/crane
+          key: crane-latest-linux-amd64
+
+      - name: Build binary + install crane
+        run: |
+          START=$(date +%s%N)
+
+          if [ ! -f /usr/local/bin/crane ]; then
+            (curl -sL https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz \
+              | tar xz crane && sudo mv crane /usr/local/bin/) &
+          fi
+
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -ldflags="-s -w" -trimpath \
+            -o app ./cmd/server
+
+          wait
+
+          END=$(date +%s%N)
+          echo "::notice::go build + crane install took $(( (END - START) / 1000000 ))ms"
+
+      - name: Push image with crane
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | crane auth login ghcr.io -u ${{ github.actor }} --password-stdin
+
+          mkdir -p _image/app
+          cp app _image/app/server
+          tar -cf layer.tar -C _image .
+
+          START=$(date +%s%N)
+
+          crane append \
+            --base gcr.io/distroless/static:nonroot \
+            --new_layer layer.tar \
+            --new_tag "${IMAGE}:crane-${GITHUB_SHA::7}" \
+            --set-entrypoint "/app/server"
+
+          END=$(date +%s%N)
+          echo "::notice::crane append+push took $(( (END - START) / 1000000 ))ms"
+
+          crane tag "${IMAGE}:crane-${GITHUB_SHA::7}" latest

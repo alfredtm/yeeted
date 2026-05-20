@@ -1,0 +1,6 @@
+/app
+/_image/
+/layer.tar
+*.test
+*.out
+.DS_Store

@@ -51,6 +51,7 @@ jobs:
           image: ${{ env.IMAGE }}
           registry-password: ${{ secrets.GITHUB_TOKEN }}
           sign: 'true'
+          verify-on-hit: 'false'   # trust-on-first-use; saves ~3-4s on no-op pushes
           tags: crane-${{ steps.vars.outputs.short_sha }},latest
 
       # ---- CACHE MISS PATH ----

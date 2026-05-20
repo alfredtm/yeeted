@@ -62,53 +62,35 @@ jobs:
           go-version: "1.25"
           cache-dependency-path: go.sum
 
-      - name: "Slow path: parallel cross-compile (amd64 + arm64)"
+      - name: "Slow path: cross-compile (amd64)"
         if: steps.cache.outputs.cache_hit == 'false'
         run: |
           START=$(date +%s%N)
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -trimpath -o app-amd64 ./cmd/server &
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -trimpath -o app-arm64 ./cmd/server &
-          wait
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -trimpath -o app ./cmd/server
           END=$(date +%s%N)
-          echo "::notice::parallel go build (amd64+arm64) took $(( (END - START) / 1000000 ))ms"
-          ls -la app-amd64 app-arm64
+          echo "::notice::go build took $(( (END - START) / 1000000 ))ms"
+          ls -la app
 
-      - name: "Slow path: crane append + mutate + index per-arch"
+      - name: "Slow path: crane append + mutate + tag"
         if: steps.cache.outputs.cache_hit == 'false'
         run: |
           START=$(date +%s%N)
 
-          for arch in amd64 arm64; do
-            mkdir -p _image_${arch}/app
-            cp app-${arch} _image_${arch}/app/server
-            tar -cf layer-${arch}.tar -C _image_${arch} .
-          done
+          mkdir -p _image/app
+          cp app _image/app/server
+          tar -cf layer.tar -C _image .
 
-          TAG_AMD64="${IMAGE}:crane-${GITHUB_SHA::7}-amd64"
-          TAG_ARM64="${IMAGE}:crane-${GITHUB_SHA::7}-arm64"
-          TAG_MULTI="${IMAGE}:crane-${GITHUB_SHA::7}"
-          SRC_TAG="${IMAGE}:src-${{ steps.cache.outputs.src_hash }}"
+          TAG="${IMAGE}:crane-${GITHUB_SHA::7}"
 
-          # Pin per-arch base digests — crane append --base picks runner arch by default,
-          # which would give arm64 an amd64 base.
-          AMD64_BASE=$(crane digest --platform linux/amd64 gcr.io/distroless/static:nonroot)
-          ARM64_BASE=$(crane digest --platform linux/arm64 gcr.io/distroless/static:nonroot)
+          crane append \
+            --base gcr.io/distroless/static:nonroot \
+            --new_layer layer.tar \
+            --new_tag "${TAG}"
 
-          crane append --base "gcr.io/distroless/static@${AMD64_BASE}" --new_layer layer-amd64.tar --new_tag "${TAG_AMD64}" &
-          crane append --base "gcr.io/distroless/static@${ARM64_BASE}" --new_layer layer-arm64.tar --new_tag "${TAG_ARM64}" &
-          wait
+          crane mutate "${TAG}" --entrypoint /app/server
 
-          crane mutate "${TAG_AMD64}" --entrypoint /app/server &
-          crane mutate "${TAG_ARM64}" --entrypoint /app/server &
-          wait
-
-          crane index append \
-            --manifest "${TAG_AMD64}" \
-            --manifest "${TAG_ARM64}" \
-            --tag "${TAG_MULTI}"
-
-          crane tag "${TAG_MULTI}" "src-${{ steps.cache.outputs.src_hash }}"
-          crane tag "${TAG_MULTI}" latest
+          crane tag "${TAG}" "src-${{ steps.cache.outputs.src_hash }}"
+          crane tag "${TAG}" latest
 
           END=$(date +%s%N)
-          echo "::notice::crane multi-arch append+mutate+index+tag took $(( (END - START) / 1000000 ))ms"
+          echo "::notice::crane append+mutate+tag took $(( (END - START) / 1000000 ))ms"

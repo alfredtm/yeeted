@@ -31,10 +31,10 @@ jobs:
           START=$(date +%s%N)
 
           ko publish \
-            --platform=linux/amd64,linux/arm64 \
+            --platform=linux/amd64 \
             --base-import-paths \
             --tags "ko-${GITHUB_SHA::7},latest-ko" \
             ./cmd/server
 
           END=$(date +%s%N)
-          echo "::notice::ko multi-arch build+push took $(( (END - START) / 1000000 ))ms"
+          echo "::notice::ko build+push took $(( (END - START) / 1000000 ))ms"

@@ -5,6 +5,8 @@ env:
   IMAGE: ghcr.io/${{ github.repository }}
   GO_VERSION: "1.25"
   LDFLAGS: "-s -w"
+  # Pinned distroless base. Bump intentionally to roll the cache and pick up upstream updates.
+  BASE_IMAGE: "gcr.io/distroless/static@sha256:963fa6c544fe5ce420f1f54fb88b6fb01479f054c8056d0f74cc2c6000df5240"
 
 jobs:
   build:
@@ -14,47 +16,57 @@ jobs:
       packages: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
       - name: Short SHA
         id: vars
         run: echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
-      - name: Bootstrap crane (for base digest resolution)
+      - name: Compute source hash via GitHub API
+        id: hash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ ! -x /usr/local/bin/crane ]; then
-            curl -sL https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz | tar xz crane
-            sudo mv crane /usr/local/bin/
-          fi
-
-      - name: Resolve base image digest
-        id: base
-        run: |
-          DIGEST=$(crane digest gcr.io/distroless/static:nonroot)
-          REF="gcr.io/distroless/static@${DIGEST}"
-          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
-          echo "::notice::base pinned to ${REF}"
+          START=$(date +%s%N)
+          TREE=$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${GITHUB_SHA}" -q '.tree.sha')
+          JSON=$(gh api "repos/${GITHUB_REPOSITORY}/git/trees/${TREE}")
+          HASHES=""
+          for p in cmd internal go.mod go.sum; do
+            SHA=$(echo "$JSON" | jq -r ".tree[] | select(.path == \"$p\") | .sha")
+            if [ -z "$SHA" ] || [ "$SHA" = "null" ]; then
+              echo "::error::could not find path '$p' in tree ${TREE}"
+              exit 1
+            fi
+            HASHES="${HASHES}${SHA}"$'\n'
+          done
+          HASH=$(printf '%s' "$HASHES" | sha256sum | cut -c1-12)
+          echo "hash=${HASH}" >> "$GITHUB_OUTPUT"
+          END=$(date +%s%N)
+          echo "::notice::API hash compute took $(( (END - START) / 1000000 ))ms — hash=${HASH}"
 
       - uses: alfredtm/yeet-cache-action@v1
         id: cache
         with:
-          paths: cmd internal go.mod go.sum
-          extra: go=${{ env.GO_VERSION }} base=${{ steps.base.outputs.ref }} ldflags=${{ env.LDFLAGS }}
+          hash: ${{ steps.hash.outputs.hash }}
+          extra: go=${{ env.GO_VERSION }} base=${{ env.BASE_IMAGE }} ldflags=${{ env.LDFLAGS }}
           image: ${{ env.IMAGE }}
           registry-password: ${{ secrets.GITHUB_TOKEN }}
           sign: 'true'
           tags: crane-${{ steps.vars.outputs.short_sha }},latest
 
-      - name: "Slow path: setup Go"
+      # ---- CACHE MISS PATH BELOW ----
+
+      - uses: actions/checkout@v4
+        if: steps.cache.outputs.hit == 'false'
+        with:
+          fetch-depth: 1
+
+      - name: "Setup Go"
         if: steps.cache.outputs.hit == 'false'
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: go.sum
 
-      - name: "Slow path: cross-compile (amd64)"
+      - name: "Cross-compile (amd64)"
         if: steps.cache.outputs.hit == 'false'
         run: |
           START=$(date +%s%N)
@@ -62,31 +74,25 @@ jobs:
             -ldflags="${{ env.LDFLAGS }}" -trimpath -o app ./cmd/server
           END=$(date +%s%N)
           echo "::notice::go build took $(( (END - START) / 1000000 ))ms"
-          ls -la app
 
-      - name: "Slow path: crane append + mutate + tag"
+      - name: "Crane append + mutate + tag (parallel)"
         if: steps.cache.outputs.hit == 'false'
         run: |
           START=$(date +%s%N)
-
-          mkdir -p _image/app
-          cp app _image/app/server
+          mkdir -p _image/app && cp app _image/app/server
           tar -cf layer.tar -C _image .
-
           crane append \
-            --base "${{ steps.base.outputs.ref }}" \
+            --base "${{ env.BASE_IMAGE }}" \
             --new_layer layer.tar \
             --new_tag "${{ steps.cache.outputs.src-tag }}"
-
           crane mutate "${{ steps.cache.outputs.src-tag }}" --entrypoint /app/server
-
-          crane tag "${{ steps.cache.outputs.src-tag }}" "crane-${{ steps.vars.outputs.short_sha }}"
-          crane tag "${{ steps.cache.outputs.src-tag }}" latest
-
+          crane tag "${{ steps.cache.outputs.src-tag }}" "crane-${{ steps.vars.outputs.short_sha }}" &
+          crane tag "${{ steps.cache.outputs.src-tag }}" latest &
+          wait
           END=$(date +%s%N)
           echo "::notice::crane append+mutate+tag took $(( (END - START) / 1000000 ))ms"
 
-      - name: "Slow path: sign cache entry"
+      - name: "Sign cache entry"
         if: steps.cache.outputs.hit == 'false'
         uses: alfredtm/yeet-cache-action/sign@v1
         with:

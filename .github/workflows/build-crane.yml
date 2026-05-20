@@ -15,55 +15,27 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Cache crane binary
-        uses: actions/cache@v4
-        id: crane-cache
-        with:
-          path: /usr/local/bin/crane
-          key: crane-latest-linux-amd64
+      - name: Short SHA
+        id: vars
+        run: echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
-      - name: Install crane
-        run: |
-          if [ ! -f /usr/local/bin/crane ]; then
-            curl -sL https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz \
-              | tar xz crane && sudo mv crane /usr/local/bin/
-          fi
-
-      - name: Compute source hash + check registry cache
+      - uses: alfredtm/yeet-cache-action@v1
         id: cache
-        run: |
-          HASH=$( (git rev-parse HEAD:cmd HEAD:internal HEAD:go.mod HEAD:go.sum) | sha256sum | cut -c1-12 )
-          echo "src_hash=$HASH" >> $GITHUB_OUTPUT
-          echo "::notice::source hash = $HASH"
-
-          echo "${{ secrets.GITHUB_TOKEN }}" | crane auth login ghcr.io -u ${{ github.actor }} --password-stdin
-
-          if crane manifest "${IMAGE}:src-${HASH}" >/dev/null 2>&1; then
-            echo "cache_hit=true" >> $GITHUB_OUTPUT
-            echo "::notice::CACHE HIT — skipping build, will retag"
-          else
-            echo "cache_hit=false" >> $GITHUB_OUTPUT
-            echo "::notice::cache miss — full build"
-          fi
-
-      - name: "Fast path: content-addressed retag"
-        if: steps.cache.outputs.cache_hit == 'true'
-        run: |
-          START=$(date +%s%N)
-          crane tag "${IMAGE}:src-${{ steps.cache.outputs.src_hash }}" "crane-${GITHUB_SHA::7}"
-          crane tag "${IMAGE}:src-${{ steps.cache.outputs.src_hash }}" latest
-          END=$(date +%s%N)
-          echo "::notice::content-addressed retag took $(( (END - START) / 1000000 ))ms"
+        with:
+          paths: cmd internal go.mod go.sum
+          image: ${{ env.IMAGE }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          tags: crane-${{ steps.vars.outputs.short_sha }},latest
 
       - name: "Slow path: setup Go"
-        if: steps.cache.outputs.cache_hit == 'false'
+        if: steps.cache.outputs.hit == 'false'
         uses: actions/setup-go@v5
         with:
           go-version: "1.25"
           cache-dependency-path: go.sum
 
       - name: "Slow path: cross-compile (amd64)"
-        if: steps.cache.outputs.cache_hit == 'false'
+        if: steps.cache.outputs.hit == 'false'
         run: |
           START=$(date +%s%N)
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -trimpath -o app ./cmd/server
@@ -72,7 +44,7 @@ jobs:
           ls -la app
 
       - name: "Slow path: crane append + mutate + tag"
-        if: steps.cache.outputs.cache_hit == 'false'
+        if: steps.cache.outputs.hit == 'false'
         run: |
           START=$(date +%s%N)
 
@@ -80,17 +52,16 @@ jobs:
           cp app _image/app/server
           tar -cf layer.tar -C _image .
 
-          TAG="${IMAGE}:crane-${GITHUB_SHA::7}"
-
+          # Build the image and tag it with src-<hash> so the next run hits the cache.
           crane append \
             --base gcr.io/distroless/static:nonroot \
             --new_layer layer.tar \
-            --new_tag "${TAG}"
+            --new_tag "${{ steps.cache.outputs.src-tag }}"
 
-          crane mutate "${TAG}" --entrypoint /app/server
+          crane mutate "${{ steps.cache.outputs.src-tag }}" --entrypoint /app/server
 
-          crane tag "${TAG}" "src-${{ steps.cache.outputs.src_hash }}"
-          crane tag "${TAG}" latest
+          crane tag "${{ steps.cache.outputs.src-tag }}" "crane-${{ steps.vars.outputs.short_sha }}"
+          crane tag "${{ steps.cache.outputs.src-tag }}" latest
 
           END=$(date +%s%N)
           echo "::notice::crane append+mutate+tag took $(( (END - START) / 1000000 ))ms"

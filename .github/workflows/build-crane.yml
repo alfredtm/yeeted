@@ -26,7 +26,7 @@ jobs:
         with:
           paths: cmd internal go.mod go.sum
           via-api: 'true'   # compute hash via gh api — no checkout needed for cache hits
-          extra: go=${{ env.GO_VERSION }} base=${{ env.BASE_IMAGE }} ldflags=${{ env.LDFLAGS }} sigv=gh-attest-v2
+          extra: go=${{ env.GO_VERSION }} base=${{ env.BASE_IMAGE }} ldflags=${{ env.LDFLAGS }} sigv=gh-attest-v2 measure=miss-warm
           image: ${{ env.IMAGE }}
           registry-password: ${{ secrets.GITHUB_TOKEN }}
           sign: 'true'

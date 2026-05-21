@@ -21,37 +21,16 @@ jobs:
         id: vars
         run: echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
-      - name: Compute source hash via GitHub API
-        id: hash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          START=$(date +%s%N)
-          TREE=$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${GITHUB_SHA}" -q '.tree.sha')
-          JSON=$(gh api "repos/${GITHUB_REPOSITORY}/git/trees/${TREE}")
-          HASHES_INPUT=""
-          for p in cmd internal go.mod go.sum; do
-            SHA=$(echo "$JSON" | jq -r ".tree[] | select(.path == \"$p\") | .sha")
-            if [ -z "$SHA" ] || [ "$SHA" = "null" ]; then
-              echo "::error::could not find path '$p' in tree ${TREE}"
-              exit 1
-            fi
-            HASHES_INPUT="${HASHES_INPUT}${SHA}"$'\n'
-          done
-          EXTRA="go=${{ env.GO_VERSION }} base=${{ env.BASE_IMAGE }} ldflags=${{ env.LDFLAGS }} sigv=gh-attest-v1"
-          HASH=$(printf '%sextra:%s\n' "$HASHES_INPUT" "$EXTRA" | sha256sum | cut -c1-12)
-          echo "hash=${HASH}" >> "$GITHUB_OUTPUT"
-          END=$(date +%s%N)
-          echo "::notice::API hash compute took $(( (END - START) / 1000000 ))ms — hash=${HASH}"
-
       - uses: alfredtm/yeet-cache-action@v2
         id: cache
         with:
-          hash: ${{ steps.hash.outputs.hash }}
+          paths: cmd internal go.mod go.sum
+          via-api: 'true'   # compute hash via gh api — no checkout needed for cache hits
+          extra: go=${{ env.GO_VERSION }} base=${{ env.BASE_IMAGE }} ldflags=${{ env.LDFLAGS }} sigv=gh-attest-v2
           image: ${{ env.IMAGE }}
           registry-password: ${{ secrets.GITHUB_TOKEN }}
           sign: 'true'
-          verify-on-hit: 'false'   # trust-on-first-use; saves ~3-4s on no-op pushes
+          verify-on-hit: 'false'
           tags: crane-${{ steps.vars.outputs.short_sha }},latest
 
       # ---- CACHE MISS PATH ----

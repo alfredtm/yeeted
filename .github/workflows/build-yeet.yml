@@ -1,4 +1,4 @@
-name: "build: crane (fast)"
+name: "build: yeet (cached)"
 on: push
 
 env:
@@ -31,7 +31,7 @@ jobs:
           registry-password: ${{ secrets.GITHUB_TOKEN }}
           sign: 'true'
           verify-on-hit: 'false'
-          tags: crane-${{ steps.vars.outputs.short_sha }},latest
+          tags: yeet-${{ steps.vars.outputs.short_sha }},latest
 
       # ---- CACHE MISS PATH ----
 
@@ -69,6 +69,6 @@ jobs:
             --entrypoint /app/server \
             --base "${{ env.BASE_IMAGE }}" \
             --tag "${{ steps.cache.outputs.src-tag }}" \
-            --also-tag "crane-${{ steps.vars.outputs.short_sha }},latest"
+            --also-tag "yeet-${{ steps.vars.outputs.short_sha }},latest"
           PACK_END=$(date +%s%N)
           echo "::notice::yeet-pack pack took $(( (PACK_END - PACK_START) / 1000000 ))ms"
